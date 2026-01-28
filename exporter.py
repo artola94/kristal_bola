@@ -1,0 +1,228 @@
+"""
+Kristal Bola - Data Exporter Module
+
+Handles exporting sentiment analysis results to CSV and Parquet formats.
+"""
+
+import os
+import csv
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Literal
+
+logger = logging.getLogger(__name__)
+
+# CSV column order
+COLUMNS = [
+    "poll_timestamp",
+    "topic",
+    "overall_sentiment",
+    "sentiment_score",
+    "positive_percentage",
+    "negative_percentage",
+    "neutral_percentage",
+    "key_narratives",
+    "influencers",
+    "anomalies_or_shifts",
+    "raw_summary",
+    "window_minutes",
+]
+
+
+def sanitize_filename(name: str) -> str:
+    """Convert a string to a safe filename component."""
+    # Replace spaces and special chars with hyphens
+    safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.lower())
+    # Collapse multiple hyphens
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    return safe.strip("-")
+
+
+class SessionExporter:
+    """
+    Exports sentiment analysis results to CSV or Parquet files.
+
+    Usage:
+        exporter = SessionExporter(output_dir="./data", format="csv")
+        exporter.start_session(["Bitcoin ETF", "Tech stocks"])
+
+        # After each poll result:
+        exporter.append(result_dict)
+
+        # When done:
+        filepath = exporter.close()
+    """
+
+    def __init__(
+        self,
+        output_dir: str = "./data",
+        format: Literal["csv", "parquet"] = "csv",
+    ):
+        self.output_dir = Path(output_dir)
+        self.format = format
+        self.session_id: Optional[str] = None
+        self.filepath: Optional[Path] = None
+        self.topics: List[str] = []
+        self.results_buffer: List[dict] = []
+        self._csv_file = None
+        self._csv_writer = None
+        self._row_count = 0
+
+    def _generate_filename(self) -> str:
+        """Generate filename based on topics and timestamp."""
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+
+        if len(self.topics) == 1:
+            # Single topic: topic_session_timestamp.ext
+            topic_slug = sanitize_filename(self.topics[0])
+            return f"{topic_slug}_session_{timestamp}.{self.format}"
+        else:
+            # Multiple topics: multi_session_timestamp.ext
+            return f"multi_session_{timestamp}.{self.format}"
+
+    def _ensure_output_dir(self) -> None:
+        """Create output directory if it doesn't exist."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _flatten_result(self, result: dict) -> dict:
+        """Flatten a result dict for CSV export."""
+        flat = {}
+        for col in COLUMNS:
+            value = result.get(col, "")
+            # Convert lists to JSON strings
+            if isinstance(value, list):
+                value = json.dumps(value, ensure_ascii=False)
+            flat[col] = value
+        return flat
+
+    def start_session(self, topics: List[str]) -> str:
+        """
+        Start a new export session.
+
+        Args:
+            topics: List of topics being monitored
+
+        Returns:
+            The filepath where data will be saved
+        """
+        if self._csv_file is not None:
+            logger.warning("Session already active. Closing previous session.")
+            self.close()
+
+        self.topics = topics
+        self._ensure_output_dir()
+
+        filename = self._generate_filename()
+        self.filepath = self.output_dir / filename
+        self.session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        self._row_count = 0
+        self.results_buffer = []
+
+        if self.format == "csv":
+            self._start_csv()
+        else:
+            # Parquet: buffer results, write on close
+            pass
+
+        logger.info(f"Export session started: {self.filepath}")
+        return str(self.filepath)
+
+    def _start_csv(self) -> None:
+        """Initialize CSV file with headers."""
+        self._csv_file = open(self.filepath, "w", newline="", encoding="utf-8")
+        self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=COLUMNS)
+        self._csv_writer.writeheader()
+        self._csv_file.flush()
+
+    def append(self, result: dict) -> None:
+        """
+        Append a poll result to the export.
+
+        Args:
+            result: Sentiment analysis result dictionary
+        """
+        if self.filepath is None:
+            logger.warning("No active session. Call start_session() first.")
+            return
+
+        flat = self._flatten_result(result)
+        self._row_count += 1
+
+        if self.format == "csv":
+            self._csv_writer.writerow(flat)
+            self._csv_file.flush()  # Ensure data is written immediately
+            logger.debug(f"Appended row {self._row_count} to CSV")
+        else:
+            # Parquet: buffer for batch write
+            self.results_buffer.append(flat)
+            logger.debug(f"Buffered row {self._row_count} for Parquet")
+
+    def _write_parquet(self) -> None:
+        """Write buffered results to Parquet file."""
+        if not self.results_buffer:
+            logger.warning("No data to write to Parquet.")
+            return
+
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            table = pa.Table.from_pylist(self.results_buffer)
+            pq.write_table(table, self.filepath)
+            logger.info(f"Wrote {len(self.results_buffer)} rows to Parquet")
+        except ImportError:
+            logger.error(
+                "pyarrow not installed. Install with: pip install pyarrow\n"
+                "Falling back to CSV export."
+            )
+            # Fallback to CSV
+            self.format = "csv"
+            self.filepath = self.filepath.with_suffix(".csv")
+            self._start_csv()
+            for result in self.results_buffer:
+                self._csv_writer.writerow(result)
+            self._csv_file.close()
+            self._csv_file = None
+
+    def close(self) -> Optional[str]:
+        """
+        Close the export session and finalize the file.
+
+        Returns:
+            Path to the exported file, or None if no session was active
+        """
+        if self.filepath is None:
+            return None
+
+        if self.format == "csv":
+            if self._csv_file:
+                self._csv_file.close()
+                self._csv_file = None
+                self._csv_writer = None
+        else:
+            self._write_parquet()
+
+        filepath = str(self.filepath)
+        logger.info(f"Export session closed: {filepath} ({self._row_count} rows)")
+
+        # Reset state
+        self.session_id = None
+        self.filepath = None
+        self.topics = []
+        self.results_buffer = []
+        self._row_count = 0
+
+        return filepath
+
+    @property
+    def is_active(self) -> bool:
+        """Check if a session is currently active."""
+        return self.filepath is not None
+
+    @property
+    def row_count(self) -> int:
+        """Get the number of rows written in the current session."""
+        return self._row_count
