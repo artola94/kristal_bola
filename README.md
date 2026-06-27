@@ -177,8 +177,6 @@ This installs all required dependencies including optional ones (MongoDB, Parque
 
 3. **Save the file**
 
-> **SECURITY WARNING:** Never share your `.env` file or commit it to version control. The `.gitignore` file is configured to exclude it automatically.
-
 ---
 
 ## Usage
