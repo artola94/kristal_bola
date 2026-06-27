@@ -107,6 +107,19 @@ Examples:
         help="Analysis time window in minutes (default: from env or 15)",
     )
     parser.add_argument(
+        "--model",
+        default=os.getenv("KRISTAL_MODEL", "grok-4-1-fast-reasoning"),
+        metavar="MODEL",
+        help="xAI model for analysis (default: from env or grok-4-1-fast-reasoning)",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=int(os.getenv("KRISTAL_MAX_WORKERS", "4")),
+        metavar="N",
+        help="Concurrent topic polls (default: from env or 4)",
+    )
+    parser.add_argument(
         "--mongo-uri",
         default=os.getenv("KRISTAL_MONGODB_URI"),
         metavar="URI",
@@ -448,6 +461,8 @@ def main():
     config = MonitorConfig(
         poll_interval_seconds=args.interval,
         window_minutes=args.window,
+        model=args.model,
+        max_workers=args.max_workers,
         mongodb_uri=args.mongo_uri,
         mongodb_db=args.mongo_db,
         mongodb_collection=args.mongo_collection,
