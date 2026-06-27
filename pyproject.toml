@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kristal-bola"
+version = "0.1.0"
+description = "Real-time social media sentiment monitoring system powered by Grok (xAI)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Kristal Bola Contributors" }]
+keywords = ["sentiment-analysis", "xai", "grok", "twitter", "social-media", "monitoring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+    "xai-sdk>=0.1.0",
+    "pydantic>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+mongo = ["pymongo>=4.0.0"]
+parquet = ["pyarrow>=14.0.0"]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.4.0"]
+all = ["pymongo>=4.0.0", "pyarrow>=14.0.0"]
+
+[project.urls]
+"Homepage" = "https://github.com/artola94/kristal_bola"
+"Repository" = "https://github.com/artola94/kristal_bola"
+"Issues" = "https://github.com/artola94/kristal_bola/issues"
+
+[project.scripts]
+kristal-bola = "run:main"
+
+[tool.setuptools]
+# Flat layout: explicit module list avoids picking up venv/, __pycache__, etc.
+py-modules = ["run", "sentiment", "exporter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["venv", "__pycache__", "data"]
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes (unused imports/vars), I = isort, UP = pyupgrade
+select = ["E", "W", "F", "I", "UP"]
+# E501 handled by formatter; F841 useful but we keep it
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sentiment", "exporter", "run"]
+
+[tool.coverage.run]
+branch = true
+source = ["sentiment", "exporter", "run"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

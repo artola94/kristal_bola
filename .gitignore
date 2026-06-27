@@ -30,6 +30,13 @@ ENV/
 env/
 .venv/
 
+# Testing / coverage
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
 # IDE
 .vscode/
 .idea/

@@ -13,25 +13,26 @@ Usage:
     python run.py
 """
 
-import os
-import sys
-import signal
-import logging
 import argparse
+import logging
+import os
+import signal
+import sys
 from pathlib import Path
 from typing import Optional
 
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
+
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
 except ImportError:
     pass  # python-dotenv not installed, use system env vars
 
-from sentiment import SentimentMonitor, MonitorConfig
 from exporter import SessionExporter
+from sentiment import MonitorConfig, SentimentMonitor
 
 # Logging setup
 logging.basicConfig(
@@ -40,7 +41,7 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler("kristal_bola.log", encoding="utf-8"),
-    ]
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -78,73 +79,72 @@ Examples:
   python run.py --topic "AI regulation" --topic "Tech layoffs" --interval 60
   python run.py --mongo-uri "mongodb://localhost:27017" --topic "Climate change"
   python run.py  # Interactive mode
-        """
+        """,
     )
 
     parser.add_argument(
-        "-t", "--topic",
+        "-t",
+        "--topic",
         action="append",
         dest="topics",
         metavar="TOPIC",
-        help="Topic to monitor (can be specified multiple times)"
+        help="Topic to monitor (can be specified multiple times)",
     )
     parser.add_argument(
-        "-i", "--interval",
+        "-i",
+        "--interval",
         type=int,
         default=int(os.getenv("KRISTAL_POLL_INTERVAL", "300")),
         metavar="SECONDS",
-        help="Poll interval in seconds (default: from env or 300)"
+        help="Poll interval in seconds (default: from env or 300)",
     )
     parser.add_argument(
-        "-w", "--window",
+        "-w",
+        "--window",
         type=int,
         default=int(os.getenv("KRISTAL_WINDOW_MINUTES", "15")),
         metavar="MINUTES",
-        help="Analysis time window in minutes (default: from env or 15)"
+        help="Analysis time window in minutes (default: from env or 15)",
     )
     parser.add_argument(
         "--mongo-uri",
         default=os.getenv("KRISTAL_MONGODB_URI"),
         metavar="URI",
-        help="MongoDB connection URI (default: from env)"
+        help="MongoDB connection URI (default: from env)",
     )
     parser.add_argument(
         "--mongo-db",
         default=os.getenv("KRISTAL_MONGODB_DB", "kristal_bola"),
         metavar="NAME",
-        help="MongoDB database name (default: from env or kristal_bola)"
+        help="MongoDB database name (default: from env or kristal_bola)",
     )
     parser.add_argument(
         "--mongo-collection",
         default=os.getenv("KRISTAL_MONGODB_COLLECTION", "sentiment_polls"),
         metavar="NAME",
-        help="MongoDB collection name (default: from env or sentiment_polls)"
+        help="MongoDB collection name (default: from env or sentiment_polls)",
     )
     parser.add_argument(
         "--interactive",
         action="store_true",
-        help="Force interactive mode even with other arguments"
+        help="Force interactive mode even with other arguments",
     )
 
     # Export options
     parser.add_argument(
         "--export-format",
         choices=["csv", "parquet"],
-        default="csv",
+        default=os.getenv("KRISTAL_EXPORT_FORMAT", "csv"),
         metavar="FORMAT",
-        help="Export format: csv or parquet (default: csv)"
+        help="Export format: csv or parquet (default: from env or csv)",
     )
     parser.add_argument(
         "--export-dir",
-        default="./data",
+        default=os.getenv("KRISTAL_EXPORT_DIR", "./data"),
         metavar="DIR",
-        help="Directory for exported data (default: ./data)"
+        help="Directory for exported data (default: from env or ./data)",
     )
-    parser.add_argument(
-        "--no-export",
-        action="store_true",
-        help="Disable data export to file"
-    )
+    parser.add_argument("--no-export", action="store_true", help="Disable data export to file")
 
     return parser.parse_args()
 
@@ -293,7 +293,11 @@ def interactive_configure_export(exp: SessionExporter) -> Optional[SessionExport
     return exp
 
 
-def interactive_mode(monitor: SentimentMonitor, exp: Optional[SessionExporter] = None):
+def interactive_mode(
+    monitor: SentimentMonitor,
+    exp: Optional[SessionExporter] = None,
+    args: Optional[argparse.Namespace] = None,
+):
     """Run the interactive menu."""
     while True:
         print_header()
@@ -321,7 +325,11 @@ def interactive_mode(monitor: SentimentMonitor, exp: Optional[SessionExporter] =
             interactive_configure_polling(monitor)
         elif choice == "5":
             if exp is None:
-                exp = SessionExporter()
+                # Recreate respecting CLI/env flags (e.g. --export-format parquet)
+                exp = SessionExporter(
+                    output_dir=args.export_dir if args else "./data",
+                    format=args.export_format if args else "csv",
+                )
             exp = interactive_configure_export(exp)
         elif choice == "6":
             if not monitor.list_topics():
@@ -336,6 +344,7 @@ def interactive_mode(monitor: SentimentMonitor, exp: Optional[SessionExporter] =
             # Start export session if enabled
             if exp:
                 exp.start_session(monitor.list_topics())
+                monitor.clear_callbacks()
                 monitor.on_result(exp.append)
                 print(f"\n  Export enabled: {exp.filepath}")
 
@@ -360,9 +369,13 @@ def interactive_mode(monitor: SentimentMonitor, exp: Optional[SessionExporter] =
                 input("Press Enter to continue...")
                 continue
 
-            # Start export session for single poll if enabled
+            # Start export session for single poll if enabled.
+            # Register append as the sole callback so poll_all_topics drives
+            # the export; no manual append below (would duplicate rows).
             if exp:
                 exp.start_session(monitor.list_topics())
+                monitor.clear_callbacks()
+                monitor.on_result(exp.append)
 
             print("\n  Running single poll...")
             if monitor.init_client():
@@ -372,9 +385,6 @@ def interactive_mode(monitor: SentimentMonitor, exp: Optional[SessionExporter] =
                     print(f"\n  [{r['topic']}]")
                     print(f"    Sentiment: {r['overall_sentiment']} ({r['sentiment_score']:.2f})")
                     print(f"    Summary: {r['raw_summary']}")
-                    # Export result
-                    if exp:
-                        exp.append(r)
 
             # Close export session
             if exp and exp.is_active:
@@ -407,6 +417,7 @@ def cli_mode(args: argparse.Namespace, monitor: SentimentMonitor, exp: Optional[
     # Start export session if enabled
     if exp:
         exp.start_session(monitor.list_topics())
+        monitor.clear_callbacks()
         monitor.on_result(exp.append)
 
     # Start monitoring
@@ -456,7 +467,7 @@ def main():
     # Decide mode
     if args.interactive or not args.topics:
         # Interactive mode
-        interactive_mode(monitor, exp)
+        interactive_mode(monitor, exp, args)
     else:
         # CLI mode
         cli_mode(args, monitor, exp)

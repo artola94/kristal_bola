@@ -4,15 +4,16 @@ Kristal Bola - Data Exporter Module
 Handles exporting sentiment analysis results to CSV and Parquet formats.
 """
 
-import os
 import csv
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Literal
+from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
+# Library best practice: avoid "No handlers" warnings when imported without run.py.
+logger.addHandler(logging.NullHandler())
 
 # CSV column order
 COLUMNS = [
@@ -32,13 +33,18 @@ COLUMNS = [
 
 
 def sanitize_filename(name: str) -> str:
-    """Convert a string to a safe filename component."""
+    """Convert a string to a safe filename component.
+
+    Returns a non-empty fallback ("session") if the input contains only
+    special characters and would otherwise produce an empty slug.
+    """
     # Replace spaces and special chars with hyphens
     safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.lower())
     # Collapse multiple hyphens
     while "--" in safe:
         safe = safe.replace("--", "-")
-    return safe.strip("-")
+    safe = safe.strip("-")
+    return safe or "session"
 
 
 class SessionExporter:
@@ -65,8 +71,8 @@ class SessionExporter:
         self.format = format
         self.session_id: Optional[str] = None
         self.filepath: Optional[Path] = None
-        self.topics: List[str] = []
-        self.results_buffer: List[dict] = []
+        self.topics: list[str] = []
+        self.results_buffer: list[dict] = []
         self._csv_file = None
         self._csv_writer = None
         self._row_count = 0
@@ -98,7 +104,7 @@ class SessionExporter:
             flat[col] = value
         return flat
 
-    def start_session(self, topics: List[str]) -> str:
+    def start_session(self, topics: list[str]) -> str:
         """
         Start a new export session.
 

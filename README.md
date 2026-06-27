@@ -283,6 +283,8 @@ python run.py --help
 | Window | `KRISTAL_WINDOW_MINUTES` | `--window` | 15 | Minutes of data to analyze |
 | Max Retries | `KRISTAL_MAX_RETRIES` | - | 3 | Retry attempts on failure |
 | Retry Delay | `KRISTAL_RETRY_DELAY` | - | 30 | Seconds between retries |
+| Model | `KRISTAL_MODEL` | - | grok-4-1-fast-reasoning | xAI model used for analysis |
+| Max Workers | `KRISTAL_MAX_WORKERS` | - | 4 | Concurrent topic polls |
 | MongoDB URI | `KRISTAL_MONGODB_URI` | `--mongo-uri` | - | MongoDB connection string |
 | MongoDB DB | `KRISTAL_MONGODB_DB` | `--mongo-db` | kristal_bola | Database name |
 | MongoDB Collection | `KRISTAL_MONGODB_COLLECTION` | `--mongo-collection` | sentiment_polls | Collection name |
