@@ -284,6 +284,7 @@ class TestPollTopic:
         doc = m.poll_topic("test")
         assert doc["window_minutes"] == 30
         assert doc["poll_timestamp"].endswith("Z")
+        assert "+00:00Z" not in doc["poll_timestamp"]
         assert doc["topic"] == "test"
         assert "sentiment_score" in doc
 

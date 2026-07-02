@@ -252,7 +252,7 @@ class SentimentMonitor:
         response = chat.sample()
         parsed = SentimentAnalysis.model_validate_json(response.content)
         doc = parsed.model_dump()
-        doc["poll_timestamp"] = now.isoformat() + "Z"
+        doc["poll_timestamp"] = now.isoformat().replace("+00:00", "Z")
         doc["window_minutes"] = self.config.window_minutes
 
         return doc
