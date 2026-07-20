@@ -111,6 +111,41 @@ class TestSchemaValidation:
             SentimentAnalysis.model_validate(payload)
 
 
+class TestPercentageSumCheck:
+    """Percentages should roughly sum to 100; large deviations log a warning."""
+
+    def test_sum_100_no_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="sentiment"):
+            SentimentAnalysis.model_validate(_valid_payload())
+        assert not any("percentage sum" in r.message for r in caplog.records)
+
+    def test_sum_within_tolerance_no_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="sentiment"):
+            SentimentAnalysis.model_validate(
+                _valid_payload(
+                    positive_percentage=60.0, negative_percentage=20.0, neutral_percentage=17.0
+                )
+            )
+        assert not any("percentage sum" in r.message for r in caplog.records)
+
+    def test_sum_far_off_warns(self, caplog):
+        with caplog.at_level("WARNING", logger="sentiment"):
+            SentimentAnalysis.model_validate(
+                _valid_payload(
+                    positive_percentage=10.0, negative_percentage=10.0, neutral_percentage=10.0
+                )
+            )
+        assert any("percentage sum 30.0 outside 95-105" in r.message for r in caplog.records)
+
+    def test_warning_does_not_reject_payload(self):
+        r = SentimentAnalysis.model_validate(
+            _valid_payload(
+                positive_percentage=10.0, negative_percentage=10.0, neutral_percentage=10.0
+            )
+        )
+        assert r.positive_percentage == 10.0
+
+
 class TestModelDump:
     """model_dump round-trips and preserves clamped values."""
 

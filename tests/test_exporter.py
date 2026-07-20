@@ -6,7 +6,24 @@ from pathlib import Path
 
 import pytest
 
-from exporter import COLUMNS, SessionExporter, sanitize_filename
+from exporter import COLUMNS, SessionExporter, escape_csv_formula, sanitize_filename
+
+
+class TestEscapeCsvFormula:
+    @pytest.mark.parametrize("prefix", ["=", "+", "-", "@"])
+    def test_dangerous_prefixes_escaped(self, prefix):
+        assert escape_csv_formula(f"{prefix}SUM(A1)") == f"'{prefix}SUM(A1)"
+
+    def test_safe_strings_unchanged(self):
+        assert escape_csv_formula("Bitcoin ETF") == "Bitcoin ETF"
+        assert escape_csv_formula("") == ""
+        assert escape_csv_formula("price = high") == "price = high"
+
+    def test_non_strings_pass_through(self):
+        assert escape_csv_formula(0.5) == 0.5
+        assert escape_csv_formula(-0.5) == -0.5
+        assert escape_csv_formula(None) is None
+        assert escape_csv_formula(["@x"]) == ["@x"]
 
 
 class TestSanitizeFilename:
@@ -144,6 +161,36 @@ class TestSessionExporterCsv:
         assert name.startswith("multi_session_")
         assert name.endswith(".csv")
 
+    def test_filenames_unique_within_same_second(self, tmp_path):
+        """The uuid suffix prevents collisions for back-to-back sessions."""
+        exp = SessionExporter(output_dir=str(tmp_path), format="csv")
+        paths = {exp.start_session(["Bitcoin ETF"]) for _ in range(5)}
+        exp.close()
+        assert len(paths) == 5
+        assert all(Path(p).exists() for p in paths)
+
+    def test_csv_cells_escaped_against_formula_injection(self, tmp_path):
+        exp = SessionExporter(output_dir=str(tmp_path), format="csv")
+        path = exp.start_session(["Bitcoin ETF"])
+        result = self._sample_result()
+        result["topic"] = '=HYPERLINK("http://evil.example")'
+        result["raw_summary"] = "+1+1"
+        exp.append(result)
+        exp.close()
+        with open(path, newline="", encoding="utf-8") as f:
+            row = next(csv.DictReader(f))
+        assert row["topic"] == '\'=HYPERLINK("http://evil.example")'
+        assert row["raw_summary"] == "'+1+1"
+
+    def test_numeric_fields_not_escaped(self, tmp_path):
+        exp = SessionExporter(output_dir=str(tmp_path), format="csv")
+        path = exp.start_session(["Bitcoin ETF"])
+        exp.append(self._sample_result(score=-0.7))
+        exp.close()
+        with open(path, newline="", encoding="utf-8") as f:
+            row = next(csv.DictReader(f))
+        assert float(row["sentiment_score"]) == -0.7
+
     def test_start_session_when_active_closes_previous(self, tmp_path):
         exp = SessionExporter(output_dir=str(tmp_path), format="csv")
         first = exp.start_session(["Bitcoin ETF"])
@@ -219,6 +266,63 @@ class TestSessionExporterParquet:
         # After fallback, close() returns the .csv path
         assert Path(path).suffix == ".csv"
         assert Path(path).exists()
+
+
+class TestSessionExporterJsonl:
+    def _sample_result(self, topic="Bitcoin ETF", score=0.5):
+        return {
+            "poll_timestamp": "2026-01-28T10:30:00Z",
+            "topic": topic,
+            "overall_sentiment": "positive",
+            "sentiment_score": score,
+            "positive_percentage": 55.0,
+            "negative_percentage": 20.0,
+            "neutral_percentage": 25.0,
+            "key_narratives": ["institutional adoption"],
+            "influencers": ["@user1"],
+            "anomalies_or_shifts": "none",
+            "raw_summary": "Optimistic sentiment.",
+            "window_minutes": 15,
+        }
+
+    def test_jsonl_writes_native_json_lines(self, tmp_path):
+        exp = SessionExporter(output_dir=str(tmp_path), format="jsonl")
+        path = exp.start_session(["Bitcoin ETF"])
+        exp.append(self._sample_result())
+        exp.append(self._sample_result(score=-0.3))
+        exp.close()
+        with open(path, encoding="utf-8") as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+        assert len(lines) == 2
+        # Lists preserved natively (not flattened to JSON strings)
+        assert lines[0]["key_narratives"] == ["institutional adoption"]
+        assert lines[1]["sentiment_score"] == -0.3
+
+    def test_jsonl_no_formula_escaping(self, tmp_path):
+        """JSONL stores raw data; spreadsheet escaping is a CSV-only concern."""
+        exp = SessionExporter(output_dir=str(tmp_path), format="jsonl")
+        path = exp.start_session(["Bitcoin ETF"])
+        result = self._sample_result()
+        result["raw_summary"] = "=cmd"
+        exp.append(result)
+        exp.close()
+        with open(path, encoding="utf-8") as f:
+            record = json.loads(f.readline())
+        assert record["raw_summary"] == "=cmd"
+
+    def test_jsonl_filename_extension(self, tmp_path):
+        exp = SessionExporter(output_dir=str(tmp_path), format="jsonl")
+        path = exp.start_session(["Bitcoin ETF"])
+        exp.close()
+        assert Path(path).suffix == ".jsonl"
+
+    def test_jsonl_close_resets_state(self, tmp_path):
+        exp = SessionExporter(output_dir=str(tmp_path), format="jsonl")
+        exp.start_session(["Bitcoin ETF"])
+        exp.append(self._sample_result())
+        exp.close()
+        assert exp.is_active is False
+        assert exp.row_count == 0
 
 
 class TestExporterProperties:

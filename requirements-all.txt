@@ -1,0 +1,10 @@
+# Kristal Bola - All Dependencies (core + optional extras)
+# Install with: pip install -r requirements-all.txt
+
+-r requirements.txt
+
+# Optional: MongoDB support
+pymongo>=4.0.0
+
+# Parquet export for --export-format parquet
+pyarrow>=14.0.0

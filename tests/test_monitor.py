@@ -61,6 +61,47 @@ class TestMonitorConfigDefaults:
         assert c == MonitorConfig()
 
 
+class TestMonitorConfigValidation:
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("poll_interval_seconds", 0),
+            ("poll_interval_seconds", -5),
+            ("window_minutes", 0),
+            ("max_retries", 0),
+            ("retry_delay_seconds", -1),
+            ("max_workers", 0),
+        ],
+    )
+    def test_invalid_values_raise(self, field, value):
+        with pytest.raises(ValueError, match="Invalid MonitorConfig"):
+            MonitorConfig(**{field: value})
+
+    def test_error_message_names_field(self):
+        with pytest.raises(ValueError, match="poll_interval_seconds"):
+            MonitorConfig(poll_interval_seconds=0)
+
+    def test_boundary_values_pass(self):
+        c = MonitorConfig(
+            poll_interval_seconds=1,
+            window_minutes=1,
+            max_retries=1,
+            retry_delay_seconds=0,
+            max_workers=1,
+        )
+        assert c.poll_interval_seconds == 1
+
+    def test_from_env_bad_integer_raises_clear_error(self, monkeypatch):
+        monkeypatch.setenv("KRISTAL_POLL_INTERVAL", "not-a-number")
+        with pytest.raises(ValueError, match="KRISTAL_POLL_INTERVAL"):
+            MonitorConfig.from_env()
+
+    def test_from_env_negative_value_rejected(self, monkeypatch):
+        monkeypatch.setenv("KRISTAL_WINDOW_MINUTES", "-10")
+        with pytest.raises(ValueError, match="window_minutes"):
+            MonitorConfig.from_env()
+
+
 class TestTopicManagement:
     def test_add_topic(self):
         m = SentimentMonitor()
@@ -192,6 +233,54 @@ class TestConcurrency:
         results = m.poll_all_topics()
         assert len(results) == 1
         assert results[0]["topic"] == "good"
+
+
+class TestBackoff:
+    """Exponential backoff with jitter, interruptible via stop event."""
+
+    def _monitor(self, **cfg):
+        config = MonitorConfig(retry_delay_seconds=30, max_retries=3, **cfg)
+        return SentimentMonitor(config)
+
+    def test_backoff_delay_doubles_per_attempt(self, monkeypatch):
+        monkeypatch.setattr("sentiment.random.uniform", lambda a, b: 1.0)
+        m = self._monitor()
+        assert m._backoff_delay(1) == 30
+        assert m._backoff_delay(2) == 60
+        assert m._backoff_delay(3) == 120
+
+    def test_backoff_delay_has_jitter(self):
+        m = self._monitor()
+        delays = {m._backoff_delay(1) for _ in range(20)}
+        # Jitter ±25% around 30 -> values in [22.5, 37.5], not all identical
+        assert len(delays) > 1
+        assert all(22.5 <= d <= 37.5 for d in delays)
+
+    def test_retry_waits_via_stop_event_not_sleep(self, monkeypatch):
+        m = self._monitor()
+        m.poll_topic = MagicMock(side_effect=RuntimeError("api down"))
+        monkeypatch.setattr("sentiment.random.uniform", lambda a, b: 1.0)
+        waited = []
+        monkeypatch.setattr(m._stop_event, "wait", lambda timeout: waited.append(timeout) or False)
+        assert m.poll_with_retry("t") is None
+        assert waited == [30, 60]  # no wait after the final attempt
+        assert m.poll_topic.call_count == 3
+
+    def test_stop_during_backoff_aborts_retries(self, monkeypatch):
+        m = self._monitor()
+        m.poll_topic = MagicMock(side_effect=RuntimeError("api down"))
+        monkeypatch.setattr(m._stop_event, "wait", lambda timeout: True)
+        assert m.poll_with_retry("t") is None
+        # Aborted after the first failure instead of exhausting all retries
+        assert m.poll_topic.call_count == 1
+
+    def test_success_on_second_attempt(self, monkeypatch):
+        m = self._monitor()
+        good = {"topic": "t", "sentiment_score": 0.0}
+        m.poll_topic = MagicMock(side_effect=[RuntimeError("flaky"), good])
+        monkeypatch.setattr(m._stop_event, "wait", lambda timeout: False)
+        assert m.poll_with_retry("t") == good
+        assert m.poll_topic.call_count == 2
 
 
 class TestStopEvent:

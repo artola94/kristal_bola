@@ -1,13 +1,7 @@
-# Kristal Bola - Dependencies
+# Kristal Bola - Core Dependencies
 # Install with: pip install -r requirements.txt
+# For optional extras (MongoDB, Parquet), use: pip install -r requirements-all.txt
 
-# Core dependencies
 xai-sdk>=0.1.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
-
-# Optional: MongoDB support
-pymongo>=4.0.0
-
-# Parquet export for --export-format parquet
-pyarrow>=14.0.0

@@ -7,6 +7,8 @@ Handles exporting sentiment analysis results to CSV and Parquet formats.
 import csv
 import json
 import logging
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
@@ -14,6 +16,9 @@ from typing import Literal, Optional
 logger = logging.getLogger(__name__)
 # Library best practice: avoid "No handlers" warnings when imported without run.py.
 logger.addHandler(logging.NullHandler())
+
+# Characters that spreadsheet apps interpret as formula prefixes.
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 # CSV column order
 COLUMNS = [
@@ -47,9 +52,24 @@ def sanitize_filename(name: str) -> str:
     return safe or "session"
 
 
+def escape_csv_formula(value):
+    """Neutralize spreadsheet formula injection in CSV string cells.
+
+    Values starting with =, +, - or @ are executed as formulas when the CSV
+    is opened in Excel/Sheets. Prefixing with a single quote disables that.
+    Non-string values pass through unchanged.
+    """
+    if isinstance(value, str) and value[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 class SessionExporter:
     """
-    Exports sentiment analysis results to CSV or Parquet files.
+    Exports sentiment analysis results to CSV, Parquet or JSONL files.
+
+    Thread-safe: all public methods are guarded by an internal lock, so
+    callbacks from concurrent polling threads can call append() directly.
 
     Usage:
         exporter = SessionExporter(output_dir="./data", format="csv")
@@ -65,7 +85,7 @@ class SessionExporter:
     def __init__(
         self,
         output_dir: str = "./data",
-        format: Literal["csv", "parquet"] = "csv",
+        format: Literal["csv", "parquet", "jsonl"] = "csv",
     ):
         self.output_dir = Path(output_dir)
         self.format = format
@@ -75,19 +95,27 @@ class SessionExporter:
         self.results_buffer: list[dict] = []
         self._csv_file = None
         self._csv_writer = None
+        self._jsonl_file = None
         self._row_count = 0
+        # RLock: start_session() may call close() while holding the lock.
+        self._lock = threading.RLock()
 
     def _generate_filename(self) -> str:
-        """Generate filename based on topics and timestamp."""
+        """Generate filename based on topics and timestamp.
+
+        A short uuid suffix guarantees uniqueness even for two sessions
+        started within the same second.
+        """
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+        suffix = uuid.uuid4().hex[:4]
 
         if len(self.topics) == 1:
-            # Single topic: topic_session_timestamp.ext
+            # Single topic: topic_session_timestamp_suffix.ext
             topic_slug = sanitize_filename(self.topics[0])
-            return f"{topic_slug}_session_{timestamp}.{self.format}"
+            return f"{topic_slug}_session_{timestamp}_{suffix}.{self.format}"
         else:
-            # Multiple topics: multi_session_timestamp.ext
-            return f"multi_session_{timestamp}.{self.format}"
+            # Multiple topics: multi_session_timestamp_suffix.ext
+            return f"multi_session_{timestamp}_{suffix}.{self.format}"
 
     def _ensure_output_dir(self) -> None:
         """Create output directory if it doesn't exist."""
@@ -114,27 +142,28 @@ class SessionExporter:
         Returns:
             The filepath where data will be saved
         """
-        if self._csv_file is not None:
-            logger.warning("Session already active. Closing previous session.")
-            self.close()
+        with self._lock:
+            if self.filepath is not None:
+                logger.warning("Session already active. Closing previous session.")
+                self.close()
 
-        self.topics = topics
-        self._ensure_output_dir()
+            self.topics = topics
+            self._ensure_output_dir()
 
-        filename = self._generate_filename()
-        self.filepath = self.output_dir / filename
-        self.session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        self._row_count = 0
-        self.results_buffer = []
+            filename = self._generate_filename()
+            self.filepath = self.output_dir / filename
+            self.session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            self._row_count = 0
+            self.results_buffer = []
 
-        if self.format == "csv":
-            self._start_csv()
-        else:
+            if self.format == "csv":
+                self._start_csv()
+            elif self.format == "jsonl":
+                self._start_jsonl()
             # Parquet: buffer results, write on close
-            pass
 
-        logger.info(f"Export session started: {self.filepath}")
-        return str(self.filepath)
+            logger.info(f"Export session started: {self.filepath}")
+            return str(self.filepath)
 
     def _start_csv(self) -> None:
         """Initialize CSV file with headers."""
@@ -143,6 +172,10 @@ class SessionExporter:
         self._csv_writer.writeheader()
         self._csv_file.flush()
 
+    def _start_jsonl(self) -> None:
+        """Initialize JSONL file (one JSON object per line, written on append)."""
+        self._jsonl_file = open(self.filepath, "w", encoding="utf-8")
+
     def append(self, result: dict) -> None:
         """
         Append a poll result to the export.
@@ -150,21 +183,27 @@ class SessionExporter:
         Args:
             result: Sentiment analysis result dictionary
         """
-        if self.filepath is None:
-            logger.warning("No active session. Call start_session() first.")
-            return
+        with self._lock:
+            if self.filepath is None:
+                logger.warning("No active session. Call start_session() first.")
+                return
 
-        flat = self._flatten_result(result)
-        self._row_count += 1
+            self._row_count += 1
 
-        if self.format == "csv":
-            self._csv_writer.writerow(flat)
-            self._csv_file.flush()  # Ensure data is written immediately
-            logger.debug(f"Appended row {self._row_count} to CSV")
-        else:
-            # Parquet: buffer for batch write
-            self.results_buffer.append(flat)
-            logger.debug(f"Buffered row {self._row_count} for Parquet")
+            if self.format == "csv":
+                flat = {k: escape_csv_formula(v) for k, v in self._flatten_result(result).items()}
+                self._csv_writer.writerow(flat)
+                self._csv_file.flush()  # Ensure data is written immediately
+                logger.debug(f"Appended row {self._row_count} to CSV")
+            elif self.format == "jsonl":
+                # Native JSON lines: raw dict, nested lists preserved
+                self._jsonl_file.write(json.dumps(result, ensure_ascii=False) + "\n")
+                self._jsonl_file.flush()
+                logger.debug(f"Appended row {self._row_count} to JSONL")
+            else:
+                # Parquet: buffer for batch write (unescaped values)
+                self.results_buffer.append(self._flatten_result(result))
+                logger.debug(f"Buffered row {self._row_count} for Parquet")
 
     def _write_parquet(self) -> None:
         """Write buffered results to Parquet file."""
@@ -184,12 +223,12 @@ class SessionExporter:
                 "pyarrow not installed. Install with: pip install pyarrow\n"
                 "Falling back to CSV export."
             )
-            # Fallback to CSV
+            # Fallback to CSV (escape values as in normal CSV writes)
             self.format = "csv"
             self.filepath = self.filepath.with_suffix(".csv")
             self._start_csv()
             for result in self.results_buffer:
-                self._csv_writer.writerow(result)
+                self._csv_writer.writerow({k: escape_csv_formula(v) for k, v in result.items()})
             self._csv_file.close()
             self._csv_file = None
 
@@ -200,28 +239,33 @@ class SessionExporter:
         Returns:
             Path to the exported file, or None if no session was active
         """
-        if self.filepath is None:
-            return None
+        with self._lock:
+            if self.filepath is None:
+                return None
 
-        if self.format == "csv":
-            if self._csv_file:
-                self._csv_file.close()
-                self._csv_file = None
-                self._csv_writer = None
-        else:
-            self._write_parquet()
+            if self.format == "csv":
+                if self._csv_file:
+                    self._csv_file.close()
+                    self._csv_file = None
+                    self._csv_writer = None
+            elif self.format == "jsonl":
+                if self._jsonl_file:
+                    self._jsonl_file.close()
+                    self._jsonl_file = None
+            else:
+                self._write_parquet()
 
-        filepath = str(self.filepath)
-        logger.info(f"Export session closed: {filepath} ({self._row_count} rows)")
+            filepath = str(self.filepath)
+            logger.info(f"Export session closed: {filepath} ({self._row_count} rows)")
 
-        # Reset state
-        self.session_id = None
-        self.filepath = None
-        self.topics = []
-        self.results_buffer = []
-        self._row_count = 0
+            # Reset state
+            self.session_id = None
+            self.filepath = None
+            self.topics = []
+            self.results_buffer = []
+            self._row_count = 0
 
-        return filepath
+            return filepath
 
     @property
     def is_active(self) -> bool:

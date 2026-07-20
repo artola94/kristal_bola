@@ -6,14 +6,14 @@ Core module for monitoring social media sentiment on X using Grok API.
 
 import logging
 import os
+import random
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from xai_sdk import Client
 from xai_sdk.chat import system, user
 from xai_sdk.tools import x_search
@@ -91,6 +91,22 @@ class SentimentAnalysis(BaseModel):
             return 100.0
         return v
 
+    @model_validator(mode="after")
+    def _check_percentage_sum(self):
+        """Warn when the three percentages do not roughly sum to 100.
+
+        The model occasionally emits inconsistent breakdowns; a large
+        deviation signals degraded output worth flagging in the logs.
+        """
+        total = self.positive_percentage + self.negative_percentage + self.neutral_percentage
+        if not 95.0 <= total <= 105.0:
+            logger.warning(
+                f"percentage sum {total:.1f} outside 95-105 "
+                f"(pos={self.positive_percentage}, neg={self.negative_percentage}, "
+                f"neu={self.neutral_percentage})"
+            )
+        return self
+
 
 @dataclass
 class MonitorConfig:
@@ -106,16 +122,46 @@ class MonitorConfig:
     mongodb_db: str = "kristal_bola"
     mongodb_collection: str = "sentiment_polls"
 
+    def __post_init__(self) -> None:
+        """Validate configuration values, rejecting settings that would
+        crash or cause pathological behavior (e.g. busy-loop polling)."""
+        problems = []
+        if self.poll_interval_seconds < 1:
+            problems.append(
+                f"poll_interval_seconds must be >= 1 (got {self.poll_interval_seconds})"
+            )
+        if self.window_minutes < 1:
+            problems.append(f"window_minutes must be >= 1 (got {self.window_minutes})")
+        if self.max_retries < 1:
+            problems.append(f"max_retries must be >= 1 (got {self.max_retries})")
+        if self.retry_delay_seconds < 0:
+            problems.append(f"retry_delay_seconds must be >= 0 (got {self.retry_delay_seconds})")
+        if self.max_workers < 1:
+            problems.append(f"max_workers must be >= 1 (got {self.max_workers})")
+        if problems:
+            raise ValueError("Invalid MonitorConfig: " + "; ".join(problems))
+
+    @staticmethod
+    def _int_env(name: str, default: int) -> int:
+        """Read an integer env var with a clear error message on bad input."""
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"Environment variable {name}={raw!r} must be an integer") from None
+
     @classmethod
     def from_env(cls) -> "MonitorConfig":
         """Create config from environment variables."""
         return cls(
-            poll_interval_seconds=int(os.getenv("KRISTAL_POLL_INTERVAL", "300")),
-            window_minutes=int(os.getenv("KRISTAL_WINDOW_MINUTES", "15")),
-            max_retries=int(os.getenv("KRISTAL_MAX_RETRIES", "3")),
-            retry_delay_seconds=int(os.getenv("KRISTAL_RETRY_DELAY", "30")),
+            poll_interval_seconds=cls._int_env("KRISTAL_POLL_INTERVAL", 300),
+            window_minutes=cls._int_env("KRISTAL_WINDOW_MINUTES", 15),
+            max_retries=cls._int_env("KRISTAL_MAX_RETRIES", 3),
+            retry_delay_seconds=cls._int_env("KRISTAL_RETRY_DELAY", 30),
             model=os.getenv("KRISTAL_MODEL", "grok-4-1-fast-reasoning"),
-            max_workers=int(os.getenv("KRISTAL_MAX_WORKERS", "4")),
+            max_workers=cls._int_env("KRISTAL_MAX_WORKERS", 4),
             mongodb_uri=os.getenv("KRISTAL_MONGODB_URI"),
             mongodb_db=os.getenv("KRISTAL_MONGODB_DB", "kristal_bola"),
             mongodb_collection=os.getenv("KRISTAL_MONGODB_COLLECTION", "sentiment_polls"),
@@ -257,11 +303,21 @@ class SentimentMonitor:
 
         return doc
 
+    def _backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff with +/-25% jitter.
+
+        attempt 1 -> retry_delay_seconds, attempt 2 -> 2x, attempt 3 -> 4x...
+        No cap: retry counts are small (default max_retries=3).
+        """
+        base = self.config.retry_delay_seconds * (2 ** (attempt - 1))
+        return base * random.uniform(0.75, 1.25)
+
     def poll_with_retry(self, topic: str) -> Optional[dict]:
         """Run poll_topic with retries on transient errors.
 
         Pydantic ValidationErrors are not retried: the same prompt will produce
         the same schema violation, so retrying only wastes API calls and time.
+        Backoff waits are interruptible: a stop() call aborts immediately.
         """
         for attempt in range(1, self.config.max_retries + 1):
             try:
@@ -272,8 +328,11 @@ class SentimentMonitor:
             except Exception as e:
                 logger.error(f"[{topic}] Attempt {attempt}/{self.config.max_retries} failed: {e}")
                 if attempt < self.config.max_retries:
-                    logger.info(f"Retrying in {self.config.retry_delay_seconds}s...")
-                    time.sleep(self.config.retry_delay_seconds)
+                    delay = self._backoff_delay(attempt)
+                    logger.info(f"Retrying in {delay:.1f}s...")
+                    if self._stop_event.wait(timeout=delay):
+                        logger.info(f"[{topic}] Stop requested during backoff; aborting retries.")
+                        return None
         logger.error(f"[{topic}] All retries failed.")
         return None
 

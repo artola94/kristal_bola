@@ -16,8 +16,10 @@ Usage:
 import argparse
 import logging
 import os
+import re
 import signal
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -34,13 +36,37 @@ except ImportError:
 from exporter import SessionExporter
 from sentiment import MonitorConfig, SentimentMonitor
 
+
+def _get_version() -> str:
+    """Resolve the installed package version, with a source-checkout fallback."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("kristal-bola")
+        except PackageNotFoundError:
+            return "0.1.0 (not installed)"
+    except ImportError:
+        return "0.1.0 (not installed)"
+
+
+def mask_mongo_uri(uri: Optional[str]) -> str:
+    """Mask the password in a MongoDB URI for display (keeps the username)."""
+    if not uri:
+        return "Not configured"
+    return re.sub(r"(://[^:/@]+):[^@]+@", r"\1:****@", uri)
+
+
 # Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("kristal_bola.log", encoding="utf-8"),
+        # Rotate at 5 MB, keep 3 backups (~15 MB total worst case).
+        RotatingFileHandler(
+            "kristal_bola.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -82,6 +108,11 @@ Examples:
         """,
     )
 
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_get_version()}",
+    )
     parser.add_argument(
         "-t",
         "--topic",
@@ -138,6 +169,11 @@ Examples:
         help="MongoDB collection name (default: from env or sentiment_polls)",
     )
     parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single poll of all topics and exit (exit code 0 if any topic succeeded)",
+    )
+    parser.add_argument(
         "--interactive",
         action="store_true",
         help="Force interactive mode even with other arguments",
@@ -146,10 +182,10 @@ Examples:
     # Export options
     parser.add_argument(
         "--export-format",
-        choices=["csv", "parquet"],
+        choices=["csv", "parquet", "jsonl"],
         default=os.getenv("KRISTAL_EXPORT_FORMAT", "csv"),
         metavar="FORMAT",
-        help="Export format: csv or parquet (default: from env or csv)",
+        help="Export format: csv, parquet or jsonl (default: from env or csv)",
     )
     parser.add_argument(
         "--export-dir",
@@ -179,7 +215,7 @@ def print_current_config(monitor: SentimentMonitor, exp: Optional[SessionExporte
     print("\n[Current Configuration]")
     print(f"  Poll interval: {monitor.config.poll_interval_seconds}s")
     print(f"  Analysis window: {monitor.config.window_minutes} min")
-    print(f"  MongoDB: {monitor.config.mongodb_uri or 'Not configured'}")
+    print(f"  MongoDB: {mask_mongo_uri(monitor.config.mongodb_uri)}")
     if exp:
         print(f"  Export: {exp.format.upper()} -> {exp.output_dir}/")
     else:
@@ -232,7 +268,7 @@ def interactive_remove_topic(monitor: SentimentMonitor):
 def interactive_configure_mongodb(monitor: SentimentMonitor):
     """Interactively configure MongoDB."""
     print("\n[Configure MongoDB]")
-    print(f"  Current URI: {monitor.config.mongodb_uri or 'Not set'}")
+    print(f"  Current URI: {mask_mongo_uri(monitor.config.mongodb_uri)}")
     print(f"  Current DB: {monitor.config.mongodb_db}")
     print(f"  Current Collection: {monitor.config.mongodb_collection}")
 
@@ -398,6 +434,8 @@ def interactive_mode(
                     print(f"\n  [{r['topic']}]")
                     print(f"    Sentiment: {r['overall_sentiment']} ({r['sentiment_score']:.2f})")
                     print(f"    Summary: {r['raw_summary']}")
+            else:
+                print("\n  [!] Failed to initialize xAI client. Check XAI_API_KEY.")
 
             # Close export session
             if exp and exp.is_active:
@@ -438,9 +476,24 @@ def cli_mode(args: argparse.Namespace, monitor: SentimentMonitor, exp: Optional[
     print(f"\nTopics: {', '.join(args.topics)}")
     print(f"Interval: {args.interval}s | Window: {args.window}min")
     if args.mongo_uri:
-        print(f"MongoDB: {args.mongo_uri}")
+        print(f"MongoDB: {mask_mongo_uri(args.mongo_uri)}")
     if exp:
         print(f"Export: {exp.format.upper()} -> {exp.filepath}")
+
+    if args.once:
+        # Single-shot mode: one poll cycle, then exit (useful for cron/CI).
+        print("\nRunning single poll...\n")
+        monitor.init_mongodb()
+        results = monitor.poll_all_topics() if monitor.init_client() else []
+        if exp and exp.is_active:
+            filepath = exp.close()
+            print(f"\nData exported to: {filepath}")
+        if results:
+            print(f"Done. {len(results)}/{len(args.topics)} topic(s) succeeded.")
+            sys.exit(0)
+        print("All topics failed.")
+        sys.exit(1)
+
     print("\nStarting monitor... (Ctrl+C to stop)\n")
 
     monitor.run()

@@ -37,7 +37,7 @@ Kristal Bola monitors X (Twitter) for specific topics and analyzes public sentim
 - **Structured output** with sentiment scores, percentages, and summaries
 - **Anomaly detection** for sudden shifts in public opinion
 - **Influencer tracking** to identify key voices
-- **Data export** to CSV or Parquet files for analysis
+- **Data export** to CSV, Parquet or JSONL files for analysis
 - **MongoDB integration** for data persistence (optional)
 - **Interactive and CLI modes** for flexibility
 
@@ -139,7 +139,11 @@ With your virtual environment activated:
 pip install -r requirements.txt
 ```
 
-This installs all required dependencies including optional ones (MongoDB, Parquet support).
+This installs the core dependencies. To also install optional extras (MongoDB support, Parquet export):
+
+```bash
+pip install -r requirements-all.txt
+```
 
 ---
 
@@ -265,6 +269,17 @@ python run.py --topic "Tech news" --export-dir "./my_data"
 python run.py --topic "Crypto" --no-export
 ```
 
+**Run a single poll and exit (useful for cron jobs):**
+```bash
+python run.py --topic "Bitcoin ETF" --once
+# Exit code 0 if at least one topic succeeded, 1 if all failed
+```
+
+**Show version:**
+```bash
+python run.py --version
+```
+
 **See all options:**
 ```bash
 python run.py --help
@@ -286,7 +301,7 @@ python run.py --help
 | MongoDB URI | `KRISTAL_MONGODB_URI` | `--mongo-uri` | - | MongoDB connection string |
 | MongoDB DB | `KRISTAL_MONGODB_DB` | `--mongo-db` | kristal_bola | Database name |
 | MongoDB Collection | `KRISTAL_MONGODB_COLLECTION` | `--mongo-collection` | sentiment_polls | Collection name |
-| Export Format | `KRISTAL_EXPORT_FORMAT` | `--export-format` | csv | Export format (csv/parquet) |
+| Export Format | `KRISTAL_EXPORT_FORMAT` | `--export-format` | csv | Export format (csv/parquet/jsonl) |
 | Export Directory | `KRISTAL_EXPORT_DIR` | `--export-dir` | ./data | Directory for exported files |
 | Disable Export | - | `--no-export` | false | Disable file export |
 
@@ -298,12 +313,16 @@ Each monitoring session automatically exports data to files for later analysis.
 
 ### File Naming
 
-Files are named based on topics and session start time:
+Files are named based on topics, session start time, and a short unique suffix:
 
 | Scenario | Filename Example |
 |----------|------------------|
-| Single topic | `bitcoin-etf_session_2024-01-15_103045.csv` |
-| Multiple topics | `multi_session_2024-01-15_103045.csv` |
+| Single topic | `bitcoin-etf_session_2024-01-15_103045_a3f2.csv` |
+| Multiple topics | `multi_session_2024-01-15_103045_b7e1.csv` |
+
+The 4-character suffix guarantees uniqueness even when two sessions start within the same second.
+
+> **Note:** CSV string cells starting with `=`, `+`, `-` or `@` are prefixed with `'` to prevent spreadsheet formula injection when opened in Excel or Google Sheets.
 
 ### CSV Format
 
@@ -331,6 +350,21 @@ Parquet offers:
 - ~10x smaller file sizes
 - Faster loading in pandas/polars
 - Native support for arrays and complex types
+
+### JSONL Format
+
+For streaming pipelines and log-processing tools, use JSON Lines:
+
+```bash
+python run.py --topic "AI news" --export-format jsonl
+```
+
+Each line is one complete poll result as native JSON (lists stay as arrays, no flattening):
+
+```jsonl
+{"topic": "AI news", "timestamp": "2024-01-15T10:30:00Z", "overall_sentiment": "positive", "sentiment_score": 0.65, ...}
+{"topic": "AI news", "timestamp": "2024-01-15T10:35:00Z", "overall_sentiment": "positive", "sentiment_score": 0.62, ...}
+```
 
 ### Reading Exported Data
 
@@ -483,14 +517,14 @@ The xAI API has rate limits. If you hit them:
 kristal_bola/
 ├── run.py              # Entry point (CLI & interactive)
 ├── sentiment.py        # Core monitoring module
-├── exporter.py         # Data export module (CSV/Parquet)
+├── exporter.py         # Data export module (CSV/Parquet/JSONL)
 ├── data/               # Exported data files (created on first run)
-│   └── *.csv / *.parquet
+│   └── *.csv / *.parquet / *.jsonl
 ├── .env                # Your configuration (not in git)
 ├── .env.example        # Configuration template
 ├── .gitignore          # Git ignore rules
 ├── README.md           # This file
-└── kristal_bola.log    # Log file (created on first run)
+└── kristal_bola.log    # Log file (rotated at 5 MB, 3 backups kept)
 ```
 
 ---
