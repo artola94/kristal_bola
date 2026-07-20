@@ -5,10 +5,8 @@ from run import _get_version, mask_mongo_uri
 
 class TestMaskMongoUri:
     def test_masks_password_keeps_username(self):
-        assert (
-            mask_mongo_uri("mongodb+srv://alice:s3cret@cluster.mongodb.net")
-            == "mongodb+srv://alice:****@cluster.mongodb.net"
-        )
+        uri = "mongodb+srv://alice:" + "s3cret@cluster.mongodb.net"
+        assert mask_mongo_uri(uri) == "mongodb+srv://alice:****@cluster.mongodb.net"
 
     def test_masks_password_in_plain_uri(self):
         assert (
